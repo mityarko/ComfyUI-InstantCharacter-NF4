@@ -9,9 +9,12 @@ import numpy as np
 # Add the parent directory to the Python path so we can import from easycontrol
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+
+from diffusers import DiffusionPipeline, FluxControlPipeline, FluxTransformer2DModel
+from transformers import T5EncoderModel
+
 from InstantCharacter.pipeline import InstantCharacterFluxPipeline
 from huggingface_hub import login
-
 
 if "ipadapter" not in folder_paths.folder_names_and_paths:
     current_paths = [os.path.join(folder_paths.models_dir, "ipadapter")]
@@ -26,11 +29,13 @@ class InstantCharacterLoadModelFromLocal:
         return {
             "required": {
                 # 模型路径输入替换为 STRING 类型，用户可手动输入路径
-                "base_model_path": ("STRING", {"default": "models/FLUX.1-dev", "tooltip": ""}),
-                "image_encoder_path": ("STRING", {"default": "models/google/siglip-so400m-patch14-384", "tooltip": ""}),
-                "image_encoder_2_path": ("STRING", {"default": "models/facebook/dinov2-giant", "tooltip": ""}),
-                "ip_adapter_path": ("STRING", {"default": "models/InstantCharacter/instantcharacter_ip-adapter.bin", "tooltip": ""}),
+                "base_model_path": ("STRING", {"default": "models/checkpoints/FLUX.1-dev", "tooltip": ""}),
+                "image_encoder_path": ("STRING", {"default": "models/clip/siglip-so400m-patch14-384", "tooltip": ""}),
+                "image_encoder_2_path": ("STRING", {"default": "models/clip_vision/dinov2-giant", "tooltip": ""}),
+                "ip_adapter_path": ("STRING", {"default": "models/ipadapter/instantcharacter_ip-adapter.bin", "tooltip": ""}),
                 "cpu_offload": ("BOOLEAN", {"default": False, "tooltip": "是否启用CPU卸载以节省显存"}),
+                "use_nf4": ("BOOLEAN", {"default": False}),
+                "nf4_path": ("STRING", {"default": "models/checkpoints/FLUX.1-dev_Quantized_nf4", "tooltip": "GGUF模型路径，如果使用GGUF模型则需填写"}),
             }
         }
 
@@ -39,11 +44,31 @@ class InstantCharacterLoadModelFromLocal:
     CATEGORY = "InstantCharacter"
     DESCRIPTION = "加载InstantCharacter模型并支持自定义模型路径"
     
-    def load_model(self, base_model_path, image_encoder_path, image_encoder_2_path, ip_adapter_path, cpu_offload):
+    def load_model(self, base_model_path, image_encoder_path, image_encoder_2_path, ip_adapter_path, cpu_offload, use_nf4, nf4_path):
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         
-        pipe = InstantCharacterFluxPipeline.from_pretrained(base_model_path, torch_dtype=torch.bfloat16)
+        orig_pipe = InstantCharacterFluxPipeline.from_pretrained(base_model_path, torch_dtype=torch.bfloat16)
+
+        if use_nf4 and nf4_path:
+
+            print("Using four bit.")
+            transformer = FluxTransformer2DModel.from_pretrained(
+                nf4_path, subfolder="transformer", torch_dtype=torch.bfloat16
+            )
+            text_encoder_2 = T5EncoderModel.from_pretrained(
+                nf4_path, subfolder="text_encoder_2", torch_dtype=torch.bfloat16
+            )
+            pipe = InstantCharacterFluxPipeline.from_pipe(
+                orig_pipe, transformer=transformer, text_encoder_2=text_encoder_2, torch_dtype=torch.bfloat16
+            )
+        else:
+            transformer = FluxTransformer2DModel.from_pretrained(
+                base_model_path,
+                subfolder="transformer",
+                torch_dtype=torch.bfloat16,
+            )
+            pipe = InstantCharacterFluxPipeline.from_pipe(orig_pipe, transformer=transformer, torch_dtype=torch.bfloat16)
 
         # Initialize adapter first
         pipe.init_adapter(
